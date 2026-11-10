@@ -321,6 +321,19 @@ class GrwbClient:
         """消息数 GET /ms-app-message-center/api/v1.0/car/message/messageCount。"""
         return self.request("GET", "/ms-app-message-center/api/v1.0/car/message/messageCount")
 
+    def remote_control(self, service_id: str, params: dict = None) -> dict:
+        """远程控制 POST /ms-remote-control/api/v1.0/remoteControl/control。
+
+        serviceId + serviceParameters 由 App 抓包确定，例如闪灯寻车：
+            serviceId="RHL", params={"rhl": "light-flash"}
+        响应通常返回 data.sessionId（异步），实际执行结果会在后续心跳 app/hb 的
+        remoteControlMsgList 里回报。
+        """
+        setting = {"serviceParameters": [{"key": k, "value": v} for k, v in (params or {}).items()]}
+        body = json.dumps({"command": "", "serviceId": service_id, "setting": setting},
+                          separators=(",", ":"))
+        return self.request("POST", "/ms-remote-control/api/v1.0/remoteControl/control", body=body)
+
 
 # ------------------------------------------------------ JWT 获取（auth 链路） ----
 
@@ -638,6 +651,25 @@ if __name__ == "__main__":
         # 车辆配置自动引导：免堆提取，见 bootstrap_vehicle() 文档
         info = bootstrap_vehicle()
         print(json.dumps(_mask(info), ensure_ascii=False, indent=2))
+    elif action == "flash":
+        # 远程闪灯寻车（App 抓包已证实：serviceId=RHL, rhl=light-flash）
+        client = GrwbClient()
+        print(json.dumps(_mask(client.remote_control("RHL", {"rhl": "light-flash"})),
+                         ensure_ascii=False, indent=2))
+    elif action == "control":
+        # 通用远程控制：python geely_gric.py control <serviceId> key=value [key=value ...]
+        if len(sys.argv) < 3 or not any("=" in a for a in sys.argv[3:]):
+            print("用法: python3 geely_gric.py control <serviceId> key=value [key=value ...]")
+            print("示例(闪灯): python3 geely_gric.py control RHL rhl=light-flash")
+            sys.exit(1)
+        service_id = sys.argv[2]
+        params = {}
+        for kv in sys.argv[3:]:
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                params[k] = v
+        client = GrwbClient()
+        print(json.dumps(_mask(client.remote_control(service_id, params)), ensure_ascii=False, indent=2))
     else:
         client = GrwbClient()
         actions = {
@@ -648,6 +680,6 @@ if __name__ == "__main__":
             "msg": client.message_count,
         }
         if action not in actions:
-            print(f"用法: python3 {sys.argv[0]} [auth|vehicle-init|hb|detail|status|favorite|msg]")
+            print(f"用法: python3 {sys.argv[0]} [auth|vehicle-init|hb|detail|status|favorite|msg|flash|control]")
             sys.exit(1)
         print(json.dumps(_mask(actions[action]()), ensure_ascii=False, indent=2))
