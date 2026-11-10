@@ -399,9 +399,16 @@ def cmd_scan(args):
 
     har_path = discover_har(args.har)
     if not har_path:
-        print("[错误] 现场自验证未命中且未找到 HAR。两种解法：")
+        print("[！] 现场自验证未命中且未找到 HAR。两种自动验证解法：")
         print("  1) 加 --har <capture.har>（任一次抓包，含 x-signature 请求即可）离线复算候选；")
         print("  2) App 登录后挂前台 30s（心跳重签产生 STS 现场）再重跑。")
+        if getattr(args, "allow_unverified", False):
+            # 未验证模式（CI 无人值守、未配置 GRIC_HAR_B64 时使用）：候选清单已落盘，
+            # 只是无法在此处复算确认。这不是错误，返回非致命码 4 让上层以成功退出、
+            # 保留候选清单供人工下载后本地复算。
+            cand = args.candidates or "(未指定 --candidates，候选未落盘)"
+            print(f"[!] 未验证模式：候选清单 {cand}（未经复算，仅供本地确认）。")
+            sys.exit(4)
         sys.exit(3)
     print(f"[*] 离线复算 HAR：{har_path}")
 
@@ -617,6 +624,9 @@ def main():
                         help="离线复算用的 HAR 文件（默认自动发现仓库内最新 *.har）")
     p_scan.add_argument("--candidates", default=None, metavar="JSON",
                         help="把各层级候选密钥写入 JSON 文件（CI 产物/本地事后复算用）")
+    p_scan.add_argument("--allow-unverified", action="store_true",
+                        help="无 HAR 且无 STS 现场时，写入候选清单后以非致命码 4 退出，"
+                             "不视为错误（CI 无 HAR 场景用；候选需本地复算确认）")
     p_scan.add_argument("--write", action="store_true", help="命中后写入 geely_env.json")
     p_scan.add_argument("--show", dest="mask", action="store_false",
                         help="输出明文密钥（默认打码）")

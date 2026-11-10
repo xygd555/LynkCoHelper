@@ -258,9 +258,11 @@ def resolve_har(cli_path):
     return path
 
 
-def run_scan(har_path, heap_files=None):
+def run_scan(har_path, heap_files=None, allow_unverified=False):
     cmd = [sys.executable, os.path.join(HERE, "extract_gric_key.py"),
            "scan", "--write", "--candidates", CANDIDATES_FILE]
+    if allow_unverified:
+        cmd.append("--allow-unverified")
     for hf in (heap_files or []):
         cmd += ["--heap-file", hf]
     if har_path:
@@ -298,22 +300,39 @@ def main():
         print(f"[!] logcat 采集失败：{e}")
 
     har_path = resolve_har(args.har)
-    if not har_path:
-        print("[!] 未提供验证 HAR（--har / GRIC_HAR_B64）。仍会提取候选清单到")
-        print(f"    {CANDIDATES_FILE}，但无法复算验证——请下载候选清单后用")
-        print("    tools/extract_gric_key.py har <capture.har> --secret <候选> 本地复算。")
+    allow_unverified = not har_path
+    if allow_unverified:
+        print("[!] 未提供验证 HAR（--har / GRIC_HAR_B64）。以“未验证”模式运行：")
+        print(f"    仍会产出候选清单 {CANDIDATES_FILE} 并让本步骤成功退出（不阻断 CI），")
+        print("    但候选未经复算——请下载后用 tools/extract_gric_key.py har "
+              "<capture.har> --secret <候选> 本地确认，或配置 GRIC_HAR_B64 后重跑自动验证。")
 
     # 快照离线扫（快照已覆盖各存活窗口的全堆）；无快照时退化为活进程扫
-    rc = run_scan(har_path, heap_files=snaps) if snaps else run_scan(har_path)
+    if snaps:
+        rc = run_scan(har_path, heap_files=snaps, allow_unverified=allow_unverified)
+    else:
+        rc = run_scan(har_path, allow_unverified=allow_unverified)
     if rc == 0:
-        # 候选清单含明文密钥，命中后删除防泄漏（密钥仅经 geely_env.json/
-        # 一次性链接送达；workflow 仅在失败时才上传候选清单）
+        # 校验通过、密钥已写回：候选清单含明文，删除防泄漏（密钥仅经
+        # geely_env.json/一次性链接送达；workflow 用 if-no-files-found: ignore
+        # 容忍本文件缺失）
         try:
             os.remove(CANDIDATES_FILE)
         except OSError:
             pass
         print("[+] 提取完成，密钥已写入 LynkCoHelper/geely_env.json（gitignore），"
               "经一次性链接送达")
+        sys.exit(0)
+    if rc == 4:
+        # 未验证候选已产出：保留候选清单供 workflow 上传，以成功退出避免 CI 报红。
+        # 仍打印 GitHub Actions 警告注解，避免“绿色=已拿到密钥”的误判。
+        print("::warning::GRIC 密钥未验证：仅产出候选清单 gric_candidates.json，"
+              "需下载后本地复算，或配置 GRIC_HAR_B64 / App 登录产生 STS 后重跑")
+        print(f"[!] 本次未取得可自动验证的密钥，候选清单已产出：{CANDIDATES_FILE}（未验证）")
+        sys.exit(0)
+    if rc != 0:
+        print(f"[错误] 提取失败（exit {rc}）。请查看上方日志；候选清单如已生成，"
+              "workflow 仍会尝试上传供本地复算。")
     sys.exit(rc)
 
 

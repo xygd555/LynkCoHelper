@@ -63,10 +63,12 @@ jobs:
           GRIC_HAR_B64: ${{ secrets.GRIC_HAR_B64 }}
         run: python3 LynkCoHelper/tools/extract_gric_auto.py
 
-      # 仅失败时上传：候选清单含明文候选，命中时由脚本自动删除防泄漏
-      # （密钥经 geely_env.json + 一次性链接送达）
-      - name: 上传候选密钥清单（未命中时用于本地复算）
-        if: failure()
+      # 始终上传：候选清单含明文候选，仅在“未验证”或“验证未命中”时存在
+      # （验证命中时脚本会自动删除防泄漏，此时 if-no-files-found 忽略即可）。
+      # 用 if: always() 保证未配置 GRIC_HAR_B64 的“未验证”运行（以成功退出）
+      # 也能拿到候选 artifact 供本地复算。
+      - name: 上传候选密钥清单（未验证/未命中时用于本地复算）
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gric-candidates
@@ -95,12 +97,20 @@ jobs:
         if: success()
         run: |
           python3 - <<'EOF'
-          import json, time, urllib.parse, urllib.request
+          import json, os, time, urllib.parse, urllib.request
 
-          with open("LynkCoHelper/geely_env.json", encoding="utf-8") as f:
-              secret = json.load(f).get("gricSecret", "")
+          # 只有“验证命中”时脚本才会写出 geely_env.json 的 gricSecret；
+          # 未验证/未命中时该文件可能不存在，需容错跳过（否则会误报失败）。
+          path = "LynkCoHelper/geely_env.json"
+          secret = ""
+          if os.path.exists(path):
+              try:
+                  with open(path, encoding="utf-8") as f:
+                      secret = (json.load(f) or {}).get("gricSecret", "")
+              except (ValueError, OSError):
+                  secret = ""
           if not secret:
-              print("[!] geely_env.json 中未找到 gricSecret，跳过一次性链接生成")
+              print("[!] 未生成 geely_env.json 的 gricSecret（本次未验证命中），跳过一次性链接生成")
               raise SystemExit(0)
 
           # api.cloudcpp.com（API Center 阅后即焚，国内直连友好）：
