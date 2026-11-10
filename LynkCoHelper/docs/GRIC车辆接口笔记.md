@@ -285,3 +285,245 @@ resp {"code":"0","data":{"sessionId":"..."},"msg":"success"}
 GET app-services.lynkco.com.cn/auth/config/getBiometricConfig
 resp {"code":"success","data":{"period":30,"touchIdIsOpen":true,"faceIdIsOpen":true}}
 ```
+
+---
+
+## 14. 车辆接口返回结构（实跑样例，脱敏）
+
+> 来自 CI `geely-gric` 成功运行（`ec95cd3` 之后）。所有敏感值以占位/打码。`GwbClient.request()` 统一返回 `{"status": <HTTP状态码>, "data": <接口JSON>}`；接口 JSON 的一般外壳为 `{"code","data","debug":{"bizName","time","traceId"},"msg"}`。
+
+### 14.1 auth 输出
+```json
+{"authorization": "***", "expireAt": "2026-11-17 12:48:09"}
+```
+打印行：`已使用 refreshToken 自动续期获取最新 token` → `accessCode 获取成功: <前8位>...` → `JWT 换取成功，有效期至 ...` → `已写回 authorization`。
+
+### 14.2 vehicle-init 输出（脱敏）
+```json
+{
+  "identifier": "f0e***s=",
+  "series": "TDc0Mw==",
+  "vin": "L6T***02",
+  "seriesCode": "L743",
+  "plateNo": "湘AG***86"
+}
+```
+
+### 14.3 hb（心跳）
+```json
+{
+  "status": 200,
+  "data": {
+    "code": "0",
+    "data": {
+      "hbType": 3,
+      "iotStatusList": [],
+      "qrvsVehicleStatusTs": -1,
+      "remoteControlMsgList": [],
+      "rvsVehicleStatusTs": 1794314844194
+    },
+    "debug": {"bizName": "", "time": 1794314892063, "traceId": ""},
+    "msg": "success"
+  }
+}
+```
+> `remoteControlMsgList` 用于回报远程控制执行结果（异步回执）。
+
+### 14.4 favorite（收藏车辆，返回数组，字段说明）
+```json
+{
+  "status": 200,
+  "data": {
+    "code": "0",
+    "data": [
+      {
+        "aiHost": "https://gric-aic-api.geely.com",
+        "appearanceName": "哑光勃朗灰",
+        "appinnerCode": "DS11-S1",
+        "brandCode": "LYNKCO",
+        "colorCode": "396",
+        "colorName": "哑光勃朗灰",
+        "defaultCarFlag": true,
+        "defaultCarSetTime": "2026-08-29 18:51:00",
+        "extAttrs": {"loopInterval": 7},
+        "itemName": "07GT 四驱性能Ultra",
+        "modelCode": "DS11-S1",
+        "modelName": "DS11-S1",
+        "nickName": "Fany-07GT",
+        "ownerFlag": true,
+        "plateNo": "湘AG***86",
+        "pno18": "DSS***V6",
+        "relationState": 1,
+        "secondCategoryName": "07GT",
+        "seriesCode": "L743",
+        "seriesCodeVs": "DS11-S1",
+        "seriesName": "领克07",
+        "seriesNameVs": "DS11-S1",
+        "skuImg": "https://ossdopimg.lynkco.com/....png",
+        "tenantId": "LYNKCO",
+        "tspFramework": 3,
+        "tspHost": "https://gric-g-api.geely.com",
+        "tspPlatform": 3,
+        "userId": "283***96",
+        "vin": "L6T***02",
+        "webHost": "https://gric-g-static.geely.com",
+        "wheelPosition": "0"
+      }
+    ],
+    "debug": {"bizName": "ms-vehicle-core", "time": 1794314893226, "traceId": "..."},
+    "msg": "success"
+  }
+}
+```
+> 关键：`tspHost` 直接给出了这台车的业务网关就是 `gric-g-api.geely.com`（与 §2.3 一致）；`ownerFlag/defaultCarFlag` 判断车主/默认车。
+
+### 14.5 detail（车辆详情 / SIM-TBOX）
+```json
+{
+  "status": 200,
+  "data": {
+    "code": "0",
+    "data": {
+      "iccid": "<masked>",
+      "imsi": "<masked>",
+      "msisdn": "<masked>",
+      "tboxId": "<masked>",
+      "vin": "L6T***02"
+    },
+    "debug": {"bizName": "ms-app-adapter", "time": 1794314894485, "traceId": "..."},
+    "msg": "success"
+  }
+}
+```
+
+### 14.6 status（实时车况，结构分区）
+```json
+{
+  "status": 200,
+  "data": {
+    "code": "0",
+    "data": {
+      "additionalMaintenanceStatus": {
+        "tyreStatusDriver": "..", "tyreStatusDriverRear": "..", "tyreStatusPassenger": "..",
+        "tyreStatusPassengerRear": "..", "tyreTempDriver": "..", "tyreTemp...": "..",
+        "engineOilHealthLevel": "..", "odometer": "..", "daysToService": "..",
+        "distanceToService": "..", "brakeFluidLevelStatus": "..", "voltage": ".."
+      },
+      "basic": {
+        "distanceToEmpty": "..", "combinedDistanceToEmpty": "..", "distanceToEmptyOnBatteryOnly": "..",
+        "engineStatus": "..", "speed": "..", "usageMode": "..", "prkgCameraActive": "true",
+        "position": {"latitude": "<masked>", "longitude": "<masked>", "altitude": "..",
+                     "direction": "..", "marsCoordinates": "false", "posCanBeTrusted": "true"}
+      },
+      "bigdataVehicleStatus": { "distanceToEmptyOnBatteryOnly": "..", "voltage": "..", "...": ".." },
+      "climateStatus": {
+        "interiorTemp": "..", "exteriorTemp": "..", "drvHeatLv": "..", "drvVentSts": "..",
+        "steerWhlHeatingSts": "..", "winStatusDriver": "..", "winPosDriver": "..",
+        "carFridgeStatus": {"...": ".."}, "carFreezerStatus": {"...": ".."}, "...": ".."
+      },
+      "drivingBehaviourStatus": { "gearAutoStatus": "..", "transimissionGearPostion": ".." },
+      "drivingSafetyStatus": {
+        "centralLockingStatus": "..", "doorLockStatusDriver": "..", "doorOpenStatusDriver": "..",
+        "trunkLockStatus": "..", "trunkOpenStatus": "..", "electricParkBrakeStatus": "..",
+        "seatBeltStatusDriver": "..", "...": ".."
+      },
+      "electricVehicleStatus": {
+        "chargeLevel": "..", "chargeSts": "..", "chargeIAct": "..", "chargeUAct": "..",
+        "dcChargeIAct": "..", "timeToFullyCharged": "..", "isCharging": "..", "...": ".."
+      },
+      "pollutionStatus": { "interiorPM25": "..", "exteriorPM25": "..", "relHumSts": ".." },
+      "runningStatus": { "aveFuelConsumption": "..", "fuelLevel": "..", "fuelLevelPct": "..",
+                         "avgSpeed": "..", "tripMeter1": "..", "tripMeter2": "..", "...": ".." },
+      "temStatus": { "powerMode": "..", "rvsEnable": ".." },
+      "testCall": true,
+      "updateTime": 1794314844194
+    },
+    "debug": {"bizName": "ms-app-adapter", "time": 1794314895839, "traceId": "..."},
+    "msg": "success"
+  }
+}
+```
+> 说明：字段极多，这里只列分区结构与代表字段；`basic.position` 是**实时经纬度（已脱敏）**；`basic.prkgCameraActive` 反映泊车摄像头状态；胎压/门窗锁/充电/油耗等在对应分区。
+
+### 14.7 msg（告警数）
+```json
+{
+  "status": 200,
+  "data": {
+    "code": "0",
+    "data": {"alarmsTotal": 6},
+    "debug": {"bizName": "", "time": 1794314897072, "traceId": ""},
+    "msg": "success"
+  }
+}
+```
+
+### 14.8 实跑结果汇总（本次 Actions）
+| 动作 | 结果 |
+|---|---|
+| auth | ✅ 续期 + accessCode + JWT 全成功 |
+| vehicle-init | ✅ 湘AG***86 / DS11-S1 / L743 |
+| hb | ✅ `code 0` |
+| favorite | ✅ `code 0`（ownerFlag=true） |
+| detail | ✅ `code 0`（ICCID/IMSI/T-BOX） |
+| status | ✅ `code 0`（完整车况） |
+| msg | ✅ `code 0`（alarmsTotal=6） |
+
+---
+
+## 15. 摄像头 / 哨兵 / 实时画面 —— 调研与结论
+
+### 15.1 领克现状（用户确认）
+- 领克 App **可以查看「泊车图片」**，**可以查看「哨兵视频」**，但**只显示高风险事件**（低风险事件 App 不展示）。
+- 这些是**录制的图片/片段**（HTTP 可下载），与「**实时画面**」是两回事。
+- 目标诉求：**直接调用摄像头看当前实时画面**（= 实时视频流）。
+
+### 15.2 吉利系"看车摄像头"= 哨兵监控服务（分品牌部署）
+
+| 项目 | 品牌/地区 | 关键发现 |
+|---|---|---|
+| [borconi/openzeekr](https://github.com/borconi/openzeekr) | 极氪（海外） | 逆向出 `sentinel-monitoring-service`（**CN-only**）：<br>`GET /sentinel-monitoring-service/api/v1/pic/list`（泊车快照）<br>`GET /sentinel-monitoring-service/api/v1/alarm/event/query`（哨兵事件，返回 `alarmImageUrl`/`alarmVideoUrl`）<br>`POST .../alarm/event/launchUploadVideo`（取录像地址）<br>`POST .../alarm/live/app/getToken` + `GET .../alarm/live/app/launchLive`（实时 token，返回 `appId/roomId/accessToken/joinUserId`）<br>文档：**海外网关未部署（404 `00A01`）；实时画面还需 RTC 厂商 SDK（作者未识别）** |
+| [suyunkai/geely-galaxy-assistant](https://github.com/suyunkai/geely-galaxy-assistant) | 吉利银河 E5（国内） | 已实现 **`photo`=获取驻车图片**：`galaxy-vc.geely.com/vc/app/v1/sentinel/queryPhotoList`；**哨兵模式开关**（`opensentry/closesentry`）；大量车控（`galaxy-vc.geely.com/vc/app/v1/vehicle/control/{door,window,climate,search,temperature,...}`）。⚠️基于**银河账号+`galaxy-*` 网关**，不支持领克；经纬度加密未解决 |
+| [Fryyyyy/zeekr_ev_api](https://github.com/Fryyyyy/zeekr_ev_api) + [zeekr_homeassistant](https://github.com/Fryyyyy/zeekr_homeassistant) | 极氪（EU） | 云 API + HA；**有哨兵模式开关**、车况/车控，**无摄像头画面** |
+| [dts88/zeekr-shortcut-car](https://github.com/dts88/zeekr-shortcut-car) | 极氪 7X | **车机端**「360环视行车记录」App（EVCam 分支），用 **Android Camera2 本地读环视摄像头**——本地预览/录制，非远程 |
+| [Mikhail2092/geely-third-party-software-analysis](https://github.com/Mikhail2092/geely-third-party-software-analysis) | 银河 L7/L6/EX5 等 | 车机内置 App 的**静态分析资料**（信息娱乐/协议），不涉及云摄像头 |
+
+### 15.3 对领克网关的实测（2026-11-10）
+用本车真实凭据、对领克国内网关只读请求"极氪那套"服务名：
+```
+gric-g-api.geely.com  /sentinel-monitoring-service/api/v1/pic/list  -> 404 {"error_msg":"404 Route Not Found"}
+gric-hf-api.geely.com /sentinel-monitoring-service/api/v1/pic/list  -> 404 Route Not Found
+```
+`404 Route Not Found` 是**网关层没有这条路由**（非鉴权失败）。说明极氪的服务名/主机不适用于领克，**领克用的是自己的一套（名字/主机不同）**。→ 需用**领克 App 抓包**定位领克的哨兵/摄像头真实接口（用户已确认 App 有泊车图片/哨兵视频）。
+
+### 15.4 实时画面的技术本质与卡点
+1. **信令**：先调接口拿加入房间参数，形如 `{appId, roomId, accessToken, joinUserId/joinRoomId, liveDuration}`；
+2. **RTC 拉流**：用对应厂商 SDK 加入房间渲染视频。
+
+**识别厂商（看信令里的 `appId` 形态）：**
+- 32 位十六进制 → 多为**声网 Agora**（channel=roomId, uid=joinUserId, token=accessToken）
+- 纯数字 `appId/sdkAppId` + `userId/userSig` → **腾讯 TRTC** 或 **即构 ZEGO**
+- `wss:// + SDP` → **WebRTC**（浏览器 / aiortc 直接拉）
+- `.flv / .m3u8 / rtmp://` → **直接 ffmpeg 拉**
+
+> 参考：极氪 `liveToken` 返回模型为 `SentryLiveTokenResp{accessToken, expireAt, issuedAt, joinRoomId, joinUserId}` + `SentryLaunchLiveResp{appId, roomId, liveDuration}`——领克大概率同构（同一平台供应商）。
+
+### 15.5 抓包要点（实时画面）
+在 Reqable 打开「实时画面」看 3~5 秒并保存 HAR，重点保留：
+1. **点开瞬间**返回 `appId/roomId/token/userId` 的那条 HTTP 的**完整请求头 + 完整响应体**（识别 RTC 的钥匙）；
+2. 之后的**媒体长连接**：`wss://`、`rtmp://`、`.flv`、`.m3u8`、`webrtc/SDP`，或 `CONNECT ip:端口`；
+3. 领克哨兵/摄像头接口的**主机与路径前缀**（确定是否可复用 GRIC 签名/主机）。
+
+### 15.6 可行性结论与路线
+
+| 目标 | 难度 | 结论 |
+|---|---|---|
+| 泊车图片 / 哨兵录像 | 🟢 简单 | 抓到领克真实接口后，HTTP 下载即可做成 `photo` / `clip` 命令 |
+| **实时画面（当前诉求）** | 🟠 中偏难 | 取决于 RTC 厂商：Agora/ZEGO/TRTC/WebRTC/FLV 可尝试在 PC 拉流截帧；若为私有加密协议则难 |
+
+**备选（非云）**：车机本地取流——把 App 装到车机用 `Camera2` 读环视（参考 `dts88/zeekr-shortcut-car`），属本地预览/录制，需要车机可安装/ADB 与相机权限。
+
+### 15.7 限制
+- 实时流可能有**时长限制**（`liveDuration`）、需车辆**在线/被唤醒**、可能有**加密或厂商私有协议**。
+- 能做到"**拉下当前一帧 / 短时看几秒**"即视为打通；持续高清直播不保证。
+- 跨品牌网关不可用（领克账号/VIN 不在银河/极氪体系）。
