@@ -145,6 +145,30 @@ def _load_config() -> dict:
         return {}
 
 
+def _resolve_device_id() -> str:
+    """解析一个非空的 GRIC 设备 ID（网关要求 X-DEVICE-ID ≥18 字符）。
+
+    优先级：环境变量 GEELY_DEVICE_ID > geely_env.json 的 device.id > 自动生成 32 位并写回。
+    自动生成后持久化到 geely_env.json，保证后续请求与 JWT 使用同一设备号。
+    """
+    v = env_value("GEELY_DEVICE_ID")
+    if v:
+        return v.strip()
+    v = (_load_config().get("device") or {}).get("id")
+    if v and str(v).strip():
+        return str(v).strip()
+    v = uuid.uuid4().hex  # 32 hex，满足 ≥18
+    try:
+        cfg = _load_config() or {}
+        cfg.setdefault("device", {})["id"] = v
+        with open(ENV_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        print(f"[信息] 已生成并写回 device.id: {v[:8]}...（{ENV_FILE}）")
+    except Exception:
+        pass
+    return v
+
+
 def _get(name: str, env_var: str = "", section: str = "") -> str:
     """取值优先级：环境变量 > geely_env.json > 内置默认值（仅密钥/公共字段有默认）。"""
     value = env_value(env_var) if env_var else None
@@ -213,7 +237,7 @@ class GrwbClient:
                               or load_jwt())
 
         self.device = {
-            "id": env_value("GEELY_DEVICE_ID") or dev.get("id") or "",
+            "id": env_value("GEELY_DEVICE_ID") or dev.get("id") or _resolve_device_id(),
             "brand": dev.get("brand", "google"),
             "model": dev.get("model", "sdk_gphone64_arm64"),
             "osVersion": dev.get("osVersion", "Android 13 (API 33)"),
@@ -363,9 +387,8 @@ def _get_access_code_v4(token: str, session=None) -> str:
         "gl_app_build": "403101250",
         "x-gapi-route-flag": "beta",
     })
-    dev_id = env_value("GEELY_DEVICE_ID") or _load_config().get("device", {}).get("id")
-    if dev_id:
-        headers["gl_dev_id"] = dev_id
+    dev_id = env_value("GEELY_DEVICE_ID") or _load_config().get("device", {}).get("id") or _resolve_device_id()
+    headers["gl_dev_id"] = dev_id
     uid = env_value("GEELY_USER_ID")
     if uid:
         headers["gl_user_id"] = uid
@@ -451,7 +474,7 @@ def get_gric_jwt(auth_code: str, device: dict = None, session=None) -> str:
     cfg = _load_config()
     dev = device or cfg.get("device", {})
     dev = {
-        "id": env_value("GEELY_DEVICE_ID") or dev.get("id") or "",
+        "id": env_value("GEELY_DEVICE_ID") or dev.get("id") or _resolve_device_id(),
         "brand": dev.get("brand", "google"),
         "model": dev.get("model", "sdk_gphone64_arm64"),
         "osVersion": dev.get("osVersion", "Android 13 (API 33)"),
@@ -495,18 +518,16 @@ def refresh_gric_jwt(token: str = None, device_id: str = None, write: bool = Tru
     """执行完整 auth 链路（第 1+2 步）并写回 geely_env.json。"""
     access_code = get_access_code(token=token)
     print(f"[信息] accessCode 获取成功: {access_code[:8]}...")
-    device = None
-    if device_id:
-        device = {"id": device_id, "brand": "google", "model": "sdk_gphone64_arm64",
-                  "osVersion": "Android 13 (API 33)", "platform": "Android"}
+    device_id = device_id or _resolve_device_id()
+    device = {"id": device_id, "brand": "google", "model": "sdk_gphone64_arm64",
+              "osVersion": "Android 13 (API 33)", "platform": "Android"}
     jwt = get_gric_jwt(access_code, device=device)
     exp = _jwt_exp(jwt)
     print(f"[信息] JWT 换取成功，有效期至 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exp))}")
     if write:
         cfg = _load_config()
         cfg["authorization"] = jwt
-        if device_id:
-            cfg.setdefault("device", {})["id"] = device_id
+        cfg.setdefault("device", {})["id"] = device_id
         with open(ENV_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         print(f"[信息] 已写回 {ENV_FILE} 的 authorization 字段")
