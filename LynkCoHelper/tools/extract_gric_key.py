@@ -62,9 +62,14 @@ import hmac
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(HERE, "..", "geely_env.json")
@@ -308,6 +313,130 @@ def _report_and_write(key, note, args):
         write_env_secret(key.decode())
 
 
+# ------------------------------------------------ 在线签名校验（oracle） ----
+# 适用场景：没有 HAR、App 又未登录（堆里没有 STS 现场）时的兜底校验。
+# 用候选密钥去签一个“无需登录”的 GRIC get/token 请求：
+#   - 密钥错误 -> 网关 400 / code=00A06 "Signature verification failed."
+#   - 密钥正确 -> 通过签名校验，网关继续处理 authCode 并返回业务层错误（非 00Axx）
+# 因此“返回码不是网关 00Axx、且不是签名错误”的唯一候选即为真实密钥。
+# 全程无需账号、无需 HAR，只要能访问 gric-api.geely.com 即可（CI runner 可直连）。
+GRIC_API_BASE = "https://gric-api.geely.com"
+GRIC_GATEWAY_ERR_PREFIX = "00A"   # 网关层错误码前缀（00A02 头校验、00A06 签名错误…）
+GRIC_ORACLE_DEVICE_ID = "0123456789abcdef0123456789abcdef"
+
+
+def _gric_get_token_path():
+    """从 geely_gric.py 源码读取 get/token 路径（避免 import requests 依赖）。"""
+    try:
+        with open(os.path.join(HERE, "..", "geely_gric.py"), "r", encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return ""
+    m = re.search(r'GRIC_GET_TOKEN_PATH\s*=\s*"([^"]+)"', src)
+    return m.group(1) if m else ""
+
+
+def _gric_oracle_headers():
+    return {
+        "accept-language": "zh_CN",
+        "x-api-signature-nonce": str(uuid.uuid4()),
+        "x-api-signature-version": "2.1",
+        "x-app-id": os.environ.get("GEELY_APP_ID") or "GEELYCNCH001M0001",
+        "x-app-version": os.environ.get("GEELY_APP_VERSION") or "4.2.6",
+        "x-device-brand": "google",
+        "x-device-id": os.environ.get("GEELY_DEVICE_ID") or GRIC_ORACLE_DEVICE_ID,
+        "x-device-model": "sdk_gphone64_arm64",
+        "x-device-os-version": "Android 13 (API 33)",
+        "x-platform": "Android",
+        "x-sales-platform": "LYNKCO",
+        "x-tenant-id": "LYNKCO",
+        "x-timestamp": str(int(time.time() * 1000)),
+        "x-tsp-platform": "2",
+        "x-vehicle-brand": "LYNKCO",
+    }
+
+
+def _gric_sign(method, path, headers, body, secret):
+    """与 geely_gric.build_gric_signature 相同口径的 X-SIGNATURE v2.1。"""
+    lines = []
+    for name in ("accept-language", "authorization"):
+        if headers.get(name):
+            lines.append(f"{name}:{headers[name]}")
+    for k in sorted(k for k in headers if k.startswith("x-") and k != "x-signature" and headers[k]):
+        lines.append(f"{k}:{headers[k]}")
+    if body:
+        lines.append(base64.b64encode(hashlib.md5(body.encode()).digest()).decode())
+    lines.append(method.upper())
+    lines.append(path)
+    msg = "\n".join(lines)
+    return base64.b64encode(hmac.new(secret.encode(), msg.encode(), hashlib.sha256).digest()).decode()
+
+
+def _http_post(url, headers, data, timeout=15):
+    """POST，优先校验证书，失败则退用不校验证书（CI 常见证书链缺失）。"""
+    for ctx in (ssl.create_default_context(), ssl._create_unverified_context()):
+        try:
+            req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()      # 4xx/5xx 也带 JSON body，属正常可判读
+        except ssl.SSLError:
+            continue
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}".encode()
+    return None, b"SSL error"
+
+
+def _oracle_probe(key_str, path):
+    """单个候选密钥的在线签名校验结果。"""
+    body = json.dumps({"authCode": "00000000-0000-0000-0000-000000000000",
+                       "identityType": "1"}, separators=(",", ":"))
+    headers = _gric_oracle_headers()
+    headers["x-signature"] = _gric_sign("POST", path, headers, body, key_str)
+    headers["accept"] = "application/json"
+    headers["content-type"] = "application/json"
+    status, raw = _http_post(GRIC_API_BASE + path, headers, body.encode())
+    if status is None:
+        return {"status": None, "code": None,
+                "msg": raw.decode("utf-8", "replace")[:200], "accepted": False}
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        payload = {}
+    code = payload.get("code")
+    msg = payload.get("msg") or payload.get("message") or ""
+    code_str = "" if code is None else str(code)
+    sig_failed = code_str.startswith(GRIC_GATEWAY_ERR_PREFIX) or "Signature verification failed" in msg
+    accepted = (status in (200, 400)) and not sig_failed and code is not None
+    return {"status": status, "code": code, "msg": msg, "accepted": accepted}
+
+
+def verify_keys_online(candidate_keys, max_tries=None, delay=0.2):
+    """对候选密钥逐一做在线签名校验，返回“签名通过”的候选列表。"""
+    path = _gric_get_token_path()
+    if not path:
+        print("[在线校验] 未能读取 get/token 路径，跳过在线校验")
+        return []
+    keys = list(candidate_keys)
+    if max_tries:
+        keys = keys[:max_tries]
+    print(f"[在线校验] get/token 路径就绪，逐个候选签名校验（共 {len(keys)} 个）...")
+    accepted = []
+    for i, key in enumerate(keys, 1):
+        r = _oracle_probe(key, path)
+        shown = f"{key[:6]}******{key[-4:]}" if len(key) > 12 else key
+        if r["status"] is None:
+            print(f"  [{i}/{len(keys)}] {shown}: 网络异常，跳过（{r['msg']}）")
+        elif r["accepted"]:
+            print(f"  [{i}/{len(keys)}] {shown}: 签名通过 ✓ (code={r['code']}, {r['msg']})")
+            accepted.append(key)
+        else:
+            print(f"  [{i}/{len(keys)}] {shown}: 签名错误 ✗ (code={r['code']})")
+        time.sleep(delay)
+    return accepted
+
+
 def cmd_scan(args):
     blobs = []
     if getattr(args, "heap_file", None):
@@ -398,10 +527,36 @@ def cmd_scan(args):
         print(f"[*] 候选清单已写入 {args.candidates}")
 
     har_path = discover_har(args.har)
+
+    # ---- 验证优先级 2.5：无 HAR 时的在线签名校验（免登录、免 HAR） ----
+    if not har_path and getattr(args, "online_verify", False):
+        ordered, seen = [], set()
+        for _name, counter in tier_sources:
+            for k in counter:
+                if k not in seen:
+                    seen.add(k)
+                    ordered.append(k)
+        cap = int(os.environ.get("GRIC_ONLINE_MAX_CANDIDATES", "64") or "64")
+        accepted = verify_keys_online([k.decode() for k in ordered], max_tries=cap)
+        if len(accepted) == 1:
+            _report_and_write(
+                accepted[0].encode(),
+                "在线签名校验（get/token 网关：错误密钥被 00A06 拒绝，该候选签名通过）",
+                args)
+            return
+        if len(accepted) > 1:
+            print(f"[在线校验] {len(accepted)} 个候选同时通过签名校验，存在歧义，不自动写入：")
+            for k in accepted[:10]:
+                print("    " + (f"{k[:6]}******{k[-4:]}" if args.mask else k))
+        else:
+            print("[在线校验] 所有候选均被网关判签名错误（00A06）——真实密钥不在候选集"
+                  "（可能堆未捕获到或算法已升级）。")
+
     if not har_path:
-        print("[！] 现场自验证未命中且未找到 HAR。两种自动验证解法：")
+        print("[！] 现场自验证未命中且未找到 HAR。自动验证解法：")
         print("  1) 加 --har <capture.har>（任一次抓包，含 x-signature 请求即可）离线复算候选；")
-        print("  2) App 登录后挂前台 30s（心跳重签产生 STS 现场）再重跑。")
+        print("  2) 配置 GRIC_HAR_B64（CI 的 HAR 校验源），或让 App 登录产生 STS 现场后重跑；")
+        print("  3) 默认已启用在线签名校验（--online-verify），若仍失败说明候选里没有真密钥。")
         if getattr(args, "allow_unverified", False):
             # 未验证模式（CI 无人值守、未配置 GRIC_HAR_B64 时使用）：候选清单已落盘，
             # 只是无法在此处复算确认。这不是错误，返回非致命码 4 让上层以成功退出、
@@ -627,6 +782,9 @@ def main():
     p_scan.add_argument("--allow-unverified", action="store_true",
                         help="无 HAR 且无 STS 现场时，写入候选清单后以非致命码 4 退出，"
                              "不视为错误（CI 无 HAR 场景用；候选需本地复算确认）")
+    p_scan.add_argument("--online-verify", action="store_true",
+                        help="无 HAR/无 STS 时，用候选密钥对 GRIC get/token 网关做在线签名校验"
+                             "（免登录、免 HAR：错误密钥被 00A06 拒，唯一通过者即真密钥）")
     p_scan.add_argument("--write", action="store_true", help="命中后写入 geely_env.json")
     p_scan.add_argument("--show", dest="mask", action="store_false",
                         help="输出明文密钥（默认打码）")

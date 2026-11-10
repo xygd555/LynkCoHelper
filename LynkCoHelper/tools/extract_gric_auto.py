@@ -211,17 +211,28 @@ def launch_app_and_wait():
         if tap_consent():
             break
 
-    # 3. 高地址优先分块快照：每轮覆盖当前主进程全堆，崩溃重启自动跟随；
-    #    周期性补点引导页后续页；主进程消失即停
-    print("[*] SDK 初始化中，高地址优先抓主进程堆快照...")
+    # 3. 高地址优先分块快照：每轮覆盖当前主进程全堆；崩溃/重启自动跟随并主动拉起重抓
+    print("[*] SDK 初始化中，高地址优先抓主进程堆快照（崩溃后自动重启续抓）...")
     seen_pid = app_main_pid()
     next_tap = time.time() + 20
-    while time.time() - t0 < wait_sec + 60:
+    relaunch_at = 0.0
+    deadline = time.time() + (wait_sec + 180)   # 多留时间跨崩溃重启多抓几轮
+    max_rounds = int(os.environ.get("GRIC_MAX_ROUNDS", "10") or "10")
+    while time.time() < deadline:
         pid = app_main_pid()
         if pid is None:
-            print(f"[警告] 主进程已消失（libndk 崩溃常见），"
-                  f"用已抓到的 {len(snaps)} 个堆快照块离线扫描")
-            return snaps
+            # 壳在 libndk 下会周期性崩溃；主动重新拉起，等其重启后继续抓快照，
+            # 而不是一崩溃就结束（否则可能还没完成 SDK init/解密密钥就认输）。
+            if time.time() >= relaunch_at:
+                print(f"[*] 主进程消失（libndk 崩溃常见），重新拉起 App 续抓"
+                      f"（已抓 {len(snaps)} 块，第 {seq} 轮）")
+                try:
+                    core.adb("shell", "am", "start", "-n", core.ACTIVITY)
+                except Exception:
+                    pass
+                relaunch_at = time.time() + 15
+            time.sleep(3)
+            continue
         if pid != seen_pid:
             print(f"[*] 主进程 PID 变化 {seen_pid} -> {pid}（崩溃后重启），跟随新进程")
             seen_pid = pid
@@ -233,7 +244,11 @@ def launch_app_and_wait():
             snaps.extend(files)
             seq += 1
             print(f"    ... {int(time.time() - t0)}s，第 {seq} 轮 +{len(files)} 块")
+            if seq >= max_rounds:
+                print(f"[*] 已达最大轮数 {max_rounds}，停止抓取")
+                break
         time.sleep(2)
+    print(f"[*] 抓取结束，共 {len(snaps)} 块快照")
     return snaps
 
 
@@ -258,11 +273,13 @@ def resolve_har(cli_path):
     return path
 
 
-def run_scan(har_path, heap_files=None, allow_unverified=False):
+def run_scan(har_path, heap_files=None, allow_unverified=False, online_verify=False):
     cmd = [sys.executable, os.path.join(HERE, "extract_gric_key.py"),
            "scan", "--write", "--candidates", CANDIDATES_FILE]
     if allow_unverified:
         cmd.append("--allow-unverified")
+    if online_verify:
+        cmd.append("--online-verify")
     for hf in (heap_files or []):
         cmd += ["--heap-file", hf]
     if har_path:
@@ -302,16 +319,18 @@ def main():
     har_path = resolve_har(args.har)
     allow_unverified = not har_path
     if allow_unverified:
-        print("[!] 未提供验证 HAR（--har / GRIC_HAR_B64）。以“未验证”模式运行：")
-        print(f"    仍会产出候选清单 {CANDIDATES_FILE} 并让本步骤成功退出（不阻断 CI），")
-        print("    但候选未经复算——请下载后用 tools/extract_gric_key.py har "
-              "<capture.har> --secret <候选> 本地确认，或配置 GRIC_HAR_B64 后重跑自动验证。")
+        print("[!] 未提供验证 HAR（--har / GRIC_HAR_B64）。将先做在线签名校验，再降级为未验证：")
+        print(f"    - 在线校验（--online-verify）用候选去签 GRIC get/token，唯一通过者即真密钥；")
+        print(f"    - 若仍无命中，则只产出候选清单 {CANDIDATES_FILE} 并以成功退出（不阻断 CI）。")
 
-    # 快照离线扫（快照已覆盖各存活窗口的全堆）；无快照时退化为活进程扫
+    # 快照离线扫（快照已覆盖各存活窗口的全堆）；无快照时退化为活进程扫。
+    # 无 HAR 时同时开启在线签名校验（免登录、免 HAR）。
     if snaps:
-        rc = run_scan(har_path, heap_files=snaps, allow_unverified=allow_unverified)
+        rc = run_scan(har_path, heap_files=snaps,
+                      allow_unverified=allow_unverified, online_verify=allow_unverified)
     else:
-        rc = run_scan(har_path, allow_unverified=allow_unverified)
+        rc = run_scan(har_path, allow_unverified=allow_unverified,
+                      online_verify=allow_unverified)
     if rc == 0:
         # 校验通过、密钥已写回：候选清单含明文，删除防泄漏（密钥仅经
         # geely_env.json/一次性链接送达；workflow 用 if-no-files-found: ignore
@@ -326,8 +345,8 @@ def main():
     if rc == 4:
         # 未验证候选已产出：保留候选清单供 workflow 上传，以成功退出避免 CI 报红。
         # 仍打印 GitHub Actions 警告注解，避免“绿色=已拿到密钥”的误判。
-        print("::warning::GRIC 密钥未验证：仅产出候选清单 gric_candidates.json，"
-              "需下载后本地复算，或配置 GRIC_HAR_B64 / App 登录产生 STS 后重跑")
+        print("::warning::GRIC 密钥未验证：在线签名校验未命中，仅产出候选清单 gric_candidates.json，"
+              "需下载后本地 har 复算，或配置 GRIC_HAR_B64 后重跑")
         print(f"[!] 本次未取得可自动验证的密钥，候选清单已产出：{CANDIDATES_FILE}（未验证）")
         sys.exit(0)
     if rc != 0:
