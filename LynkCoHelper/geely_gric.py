@@ -575,8 +575,8 @@ def bootstrap_vehicle(write: bool = True) -> dict:
         with open(ENV_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         print(f"[信息] 已写回 {ENV_FILE} 的 vehicle 字段")
-    print(f"[信息] 车辆: {car.get('plateNo')} {car.get('modelName')} VIN={vin} "
-          f"seriesCode={series_code} identifier={identifier[:12]}...")
+    print(f"[信息] 车辆: {_mask_str(car.get('plateNo'))} {car.get('modelName')} "
+          f"VIN={_mask_str(vin)} seriesCode={series_code} identifier={_mask_str(identifier)}")
     return {"identifier": identifier, "series": series, "vin": vin,
             "seriesCode": series_code, "plateNo": car.get("plateNo")}
 
@@ -588,12 +588,34 @@ def _safe_json(resp) -> object:
         return resp.text[:500]
 
 
+def _mask_str(value, head=3, tail=2):
+    """把字符串保留首尾、中间打码；太短则整体 ***。"""
+    s = str(value)
+    if len(s) <= head + tail:
+        return "***"
+    return f"{s[:head]}***{s[-tail:]}"
+
+
+# 日志脱敏的敏感字段名（按 key 归一化：小写、连字符换下划线）
+_MASK_KEYS = {
+    "userid", "user_id", "openid", "open_id", "accountid", "account_id",
+    "vin", "plateno", "plate_no", "plate", "licenseplate", "license_plate",
+    "identifier", "x_vehicle_identifier",
+    "mobile", "phone", "phonenumber", "phone_number",
+    "token", "authorization",
+}
+
+
 def _mask(data):
-    """日志脱敏：userId/openId 等敏感字段。"""
-    keys = {"userid", "user_id", "openid", "open_id", "accountid", "account_id"}
+    """递归日志脱敏：userId/openId、VIN、车牌、车辆 identifier、手机号、token 等。"""
     if isinstance(data, dict):
-        return {k: ("***" if k.replace("-", "_").lower() in keys and v else _mask(v))
-                for k, v in data.items()}
+        out = {}
+        for k, v in data.items():
+            if str(k).replace("-", "_").lower() in _MASK_KEYS and v:
+                out[k] = _mask_str(v) if isinstance(v, str) else "***"
+            else:
+                out[k] = _mask(v)
+        return out
     if isinstance(data, list):
         return [_mask(x) for x in data]
     return data
@@ -611,7 +633,7 @@ if __name__ == "__main__":
     elif action == "vehicle-init":
         # 车辆配置自动引导：免堆提取，见 bootstrap_vehicle() 文档
         info = bootstrap_vehicle()
-        print(json.dumps(info, ensure_ascii=False, indent=2))
+        print(json.dumps(_mask(info), ensure_ascii=False, indent=2))
     else:
         client = GrwbClient()
         actions = {
