@@ -323,12 +323,71 @@ def _base_gric_headers(authorization: str, device: dict, vehicle: dict,
     return {k: v for k, v in headers.items() if v}
 
 
+V4_CODE_URL = "https://app-services.lynkco.com.cn/auth/oauth2/v4/code"
+V4_CODE_PATH = "/auth/oauth2/v4/code"
+
+
+def _get_access_code_v4(token: str, session=None) -> str:
+    """Android App 的 v4/code 流程：一次 GET 直接返回 accessCode（无需 appsecret 头）。
+
+    抓包对照：GET /auth/oauth2/v4/code?responseType=code&clientId=30000028&scope=snsapiUserinfo
+    x-ca 签名只覆盖 x-ca-nonce/x-ca-timestamp/x-ca-key 三个头（与 build_native_signature 一致），
+    其余 gl_*/appversion 头不参与签名、仅供风控；响应 data.accessCode 即后续换 GRIC JWT 的 authCode。
+    """
+    import lynkco_common
+
+    query = {
+        "responseType": "code",
+        "clientId": env_value("GEELY_V4_CLIENT_ID") or "30000028",
+        "scope": "snsapiUserinfo",
+    }
+    headers = lynkco_common.build_native_signature(
+        "GET", V4_CODE_PATH, query=query,
+        accept="application/json; charset=utf-8",
+        content_type="application/x-www-form-urlencoded; charset=utf-8",
+        signature_headers_order="x-ca-nonce,x-ca-timestamp,x-ca-key",
+    )
+    headers.update({
+        "token": token,
+        "ca_version": "1",
+        "user-agent": "ALIYUN-ANDROID-UA",
+        "publicplatform": "android",
+        "appversioncode": env_value("GEELY_APP_VERSION") or "4.3.0",
+        "appversionname": "403101250",
+        "gl_dev_name": env_value("GEELY_DEVICE_NAME") or "OnePlus8T_CH",
+        "gl_dev_model": env_value("GEELY_DEVICE_MODEL") or "RMX2050",
+        "gl_dev_brand": env_value("GEELY_DEVICE_BRAND") or "realme",
+        "gl_dev_platform": "android",
+        "gl_os_version": env_value("GEELY_DEVICE_OS") or "34",
+        "gl_app_version": env_value("GEELY_APP_VERSION") or "4.3.0",
+        "gl_app_build": "403101250",
+        "x-gapi-route-flag": "beta",
+    })
+    dev_id = env_value("GEELY_DEVICE_ID") or _load_config().get("device", {}).get("id")
+    if dev_id:
+        headers["gl_dev_id"] = dev_id
+    uid = env_value("GEELY_USER_ID")
+    if uid:
+        headers["gl_user_id"] = uid
+
+    sess = session or requests.Session()
+    resp = sess.get(V4_CODE_URL, params=query, headers=headers, timeout=DEFAULT_TIMEOUT)
+    data = _safe_json(resp)
+    access_code = None
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        access_code = data["data"].get("accessCode")
+    if resp.status_code != 200 or not access_code:
+        detail = json.dumps(data, ensure_ascii=False)[:300] if isinstance(data, dict) else str(data)[:300]
+        raise RuntimeError(f"v4/code 获取 accessCode 失败（HTTP {resp.status_code}）: {detail}")
+    return access_code
+
+
 def get_access_code(token: str = None, session=None) -> str:
     """第 1 步：领克登录态换 accessCode（一次性、短时效）。
 
-    复用 env.json 的领克 token（token 不传则调 lynkco_login.load_token 自动续期），
-    走原生 x-ca-* 签名 + appsecret 头（appsecret 从 geely_env.json 的
-    lynkcoAppsecret 字段或环境变量 GEELY_LYNKCO_APPSECRET 读取）。
+    依次尝试两套流程，均复用 env.json 的领克 token：
+      A) Android App 的 /auth/oauth2/v4/code —— 响应直接返回 accessCode，无需 appsecret（抓包实测可用，优先）；
+      B) 旧版 /auth/oauth2/access-code —— 需要 appsecret 头（geely_env.json 的 lynkcoAppsecret）。
     """
     import lynkco_common
     from lynkco_login import load_token
@@ -338,11 +397,17 @@ def get_access_code(token: str = None, session=None) -> str:
     if not token.startswith("bearer"):
         token = f"bearer{token}"
 
+    # 方案 A：Android v4/code（免 appsecret，优先）
+    try:
+        return _get_access_code_v4(token, session=session)
+    except Exception as e_v4:
+        print(f"[警告] v4/code 获取 accessCode 失败：{e_v4}；回退旧 access-code(appsecret) 流程")
+
+    # 方案 B：旧 access-code，需要 appsecret 头
     appsecret = _get("lynkcoAppsecret", env_var="GEELY_LYNKCO_APPSECRET")
     if not appsecret:
-        raise RuntimeError("缺少 appsecret 头的值：请在 geely_env.json 中配置 lynkcoAppsecret 字段"
-                           "（从 App 抓包的 access-code 请求头提取）")
-
+        raise RuntimeError("v4/code 与旧 access-code 流程均失败：若坚持旧流程，请在 geely_env.json 配置 "
+                           "lynkcoAppsecret（从 access-code 请求头抓取）")
     query = {"scope": "openid", "state": "vehiclenet"}
     headers = lynkco_common.build_native_signature(
         "GET", LYNKCO_ACCESS_CODE_PATH, query=query,
