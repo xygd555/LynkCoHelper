@@ -53,6 +53,12 @@ jobs:
           LYNKCO_REFRESH_TOKEN: ${{ secrets.LYNKCO_REFRESH_TOKEN }}
           LYNKCO_DEVICE_ID: ${{ secrets.LYNKCO_DEVICE_ID }}
           LYNKCO_APP_SECRETS: ${{ secrets.LYNKCO_APP_SECRETS }}
+          # 也支持分别配置（优先级高于 LYNKCO_APP_SECRETS）
+          LYNKCO_NATIVE_APP_KEY: ${{ secrets.LYNKCO_NATIVE_APP_KEY }}
+          LYNKCO_NATIVE_APP_SECRET: ${{ secrets.LYNKCO_NATIVE_APP_SECRET }}
+          LYNKCO_NATIVE_APP_CODE: ${{ secrets.LYNKCO_NATIVE_APP_CODE }}
+          LYNKCO_LOGIN_APP_CODE: ${{ secrets.LYNKCO_LOGIN_APP_CODE }}
+          LYNKCO_TOKEN: ${{ secrets.LYNKCO_TOKEN }}
           # —— GRIC ——
           GEELY_GRIC_SECRET: ${{ secrets.GEELY_GRIC_SECRET }}
           GEELY_LYNKCO_APPSECRET: ${{ secrets.GEELY_LYNKCO_APPSECRET }}
@@ -63,6 +69,16 @@ jobs:
         run: |
           set -uo pipefail
           cd LynkCoHelper
+
+          # 预检：签名密钥与登录态（缺了立刻给明确提示，不要等到 auth 里抛堆栈）
+          if [ -z "${LYNKCO_APP_SECRETS:-}" ] && { [ -z "${LYNKCO_NATIVE_APP_KEY:-}" ] || [ -z "${LYNKCO_NATIVE_APP_SECRET:-}" ]; }; then
+            echo "::error::缺少签名密钥：请在 Secrets（不是 Variables）配置 LYNKCO_APP_SECRETS（一个 JSON），或分别配置 LYNKCO_NATIVE_APP_KEY / LYNKCO_NATIVE_APP_SECRET"
+            exit 1
+          fi
+          if [ -z "${LYNKCO_REFRESH_TOKEN:-}" ] && [ -z "${LYNKCO_TOKEN:-}" ]; then
+            echo "::error::缺少登录态：请配置 LYNKCO_REFRESH_TOKEN + LYNKCO_DEVICE_ID，或 LYNKCO_TOKEN"
+            exit 1
+          fi
 
           echo "===== auth ====="
           python geely_gric.py auth || { echo "::error::auth 失败，终止"; exit 1; }
