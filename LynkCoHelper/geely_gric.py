@@ -74,9 +74,11 @@ import requests
 
 from lynkco_common import env_value
 
-BASE_URL = "https://gric-hf-api.geely.com"
+# 业务接口（hb/status/remoteControl 等）：当前 App(4.3.0) 走 gric-g-api；旧版为 gric-hf-api，
+# 可用环境变量 GEELY_GRIC_BASE 覆盖。签名 STS 不含 host，切换域名不影响签名。
+BASE_URL = env_value("GEELY_GRIC_BASE") or "https://gric-g-api.geely.com"
 # 部分接口路由在另一网关域名（抓包确认 favorite-vehicles / get/token 走 gric-api）
-BASE_URL_API = "https://gric-api.geely.com"
+BASE_URL_API = env_value("GEELY_GRIC_BASE_API") or "https://gric-api.geely.com"
 LYNKCO_ACCESS_CODE_URL = "https://app-services.lynkco.com.cn/auth/oauth2/access-code"
 LYNKCO_ACCESS_CODE_PATH = "/auth/oauth2/access-code"
 GRIC_GET_TOKEN_PATH = "/ms-midground-user/api/v1.0/user/auth/get/token"
@@ -274,7 +276,7 @@ class GrwbClient:
             headers["x-signature"] = build_gric_signature(method, path, headers, body, query)
             headers["accept"] = "application/json"
             if body:
-                headers["content-type"] = "application/json"
+                headers["content-type"] = "application/json; charset=UTF-8"
             try:
                 resp = self.session.request(method, url, headers=headers, data=body.encode() if body else None,
                                             timeout=timeout)
@@ -305,8 +307,9 @@ class GrwbClient:
         return self.request("GET", "/ms-vehicle-account/api/v1.0/vehicle-detail", query="os=1")
 
     def vehicle_status_latest(self) -> dict:
-        """车辆状态 GET /ms-vehicle-status/api/v2.0/vehicle/status/latest。"""
-        return self.request("GET", "/ms-vehicle-status/api/v2.0/vehicle/status/latest")
+        """车辆状态 GET /ms-vehicle-status/api/v2.0/vehicle/status/latest?latest=&target=new。"""
+        return self.request("GET", "/ms-vehicle-status/api/v2.0/vehicle/status/latest",
+                            query="latest=&target=new")
 
     def favorite_vehicles(self) -> dict:
         """收藏车辆 GET /ms-vehicle-core/api/v1.0/vehicle/favorite-vehicles（gric-api 网关）。
