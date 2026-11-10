@@ -600,7 +600,7 @@ def _mask_str(value, head=3, tail=2):
 _MASK_KEYS = {
     "userid", "user_id", "openid", "open_id", "accountid", "account_id",
     "vin", "plateno", "plate_no", "plate", "licenseplate", "license_plate",
-    "identifier", "x_vehicle_identifier",
+    "identifier", "x_vehicle_identifier", "pno", "pno18", "deviceid", "device_id",
     "mobile", "phone", "phonenumber", "phone_number",
     "token", "authorization",
 }
