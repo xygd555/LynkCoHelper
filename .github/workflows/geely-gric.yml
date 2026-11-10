@@ -1,0 +1,82 @@
+name: geely-gric
+
+# 手动触发：在 GitHub Actions 上跑 GRIC 车辆接口链路
+#   auth（领克登录态 -> accessCode -> GRIC JWT）
+#   -> vehicle-init（查收藏车辆 -> 生成 identifier/series）
+#   -> 业务查询（hb/favorite/detail/status/msg）
+#
+# 所需仓库 Secrets（Settings -> Secrets and variables -> Actions）：
+#   必需：LYNKCO_REFRESH_TOKEN、LYNKCO_DEVICE_ID、LYNKCO_APP_SECRETS、GEELY_GRIC_SECRET
+#   可选：GEELY_LYNKCO_APPSECRET（iOS 旧 access-code 流程才用）
+#         GEELY_VEHICLE_IDENTIFIER、GEELY_VEHICLE_SERIES（真实车辆密文，修 detail 用）
+#         GEELY_USER_ID、GEELY_DEVICE_ID（风控/设备号，可选）
+#
+# 说明：本工作流只打印查询结果，不落地任何密钥文件（runner 销毁即丢）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "跑哪个业务查询（all=依次跑 hb/favorite/detail/status/msg）"
+        type: choice
+        default: all
+        options:
+          - all
+          - hb
+          - favorite
+          - detail
+          - status
+          - msg
+
+permissions:
+  contents: read
+
+jobs:
+  gric:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r LynkCoHelper/requirements.txt
+
+      - name: 执行 GRIC（auth -> vehicle-init -> 查询）
+        env:
+          # —— 领克登录态（与 daily-tasks 相同）——
+          LYNKCO_REFRESH_TOKEN: ${{ secrets.LYNKCO_REFRESH_TOKEN }}
+          LYNKCO_DEVICE_ID: ${{ secrets.LYNKCO_DEVICE_ID }}
+          LYNKCO_APP_SECRETS: ${{ secrets.LYNKCO_APP_SECRETS }}
+          # —— GRIC ——
+          GEELY_GRIC_SECRET: ${{ secrets.GEELY_GRIC_SECRET }}
+          GEELY_LYNKCO_APPSECRET: ${{ secrets.GEELY_LYNKCO_APPSECRET }}
+          GEELY_USER_ID: ${{ secrets.GEELY_USER_ID }}
+          GEELY_DEVICE_ID: ${{ secrets.GEELY_DEVICE_ID }}
+          GEELY_VEHICLE_IDENTIFIER: ${{ secrets.GEELY_VEHICLE_IDENTIFIER }}
+          GEELY_VEHICLE_SERIES: ${{ secrets.GEELY_VEHICLE_SERIES }}
+        run: |
+          set -uo pipefail
+          cd LynkCoHelper
+
+          echo "===== auth ====="
+          python geely_gric.py auth || { echo "::error::auth 失败，终止"; exit 1; }
+
+          echo "===== vehicle-init ====="
+          python geely_gric.py vehicle-init || echo "(vehicle-init 失败，继续)";
+
+          ACT="${{ inputs.action }}"
+          if [ "$ACT" = "all" ]; then
+            ACTIONS="hb favorite detail status msg"
+          else
+            ACTIONS="$ACT"
+          fi
+          for a in $ACTIONS; do
+            echo "===== $a ====="
+            python geely_gric.py "$a" || echo "($a failed)";
+          done
